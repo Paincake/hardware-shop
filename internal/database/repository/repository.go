@@ -1,13 +1,21 @@
 package repository
 
 type Product struct {
-	Id struct {
-		Name         string
-		Manufacturer string
-	} `bson:"_id"`
+	Id       Id `bson:"_id"`
 	Category string
 	Cost     float64
 	Quantity int
+}
+
+type CartElement struct {
+	Id       Id      `bson:"_id"`
+	Category string  `bson:"category"`
+	Cost     float64 `bson:"cost"`
+}
+
+type Id struct {
+	Name         string `bson:"name"`
+	Manufacturer string `bson:"manufacturer"`
 }
 
 type ProductFilter struct {
@@ -19,5 +27,5 @@ type ProductFilter struct {
 
 type ProductRepository interface {
 	GetProducts(filter ProductFilter) ([]Product, error)
-	AddProductToCart(clientName string, clientPhone string, product Product) ([]Product, error)
+	AddProductToCart(clientName string, clientPhone string, product Product) ([]CartElement, error)
 }
