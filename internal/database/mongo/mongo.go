@@ -32,15 +32,13 @@ func Connection(ctx context.Context) (*MongoClient, error) {
 	}
 
 	clientOpts := options.Client().
-		ApplyURI(fmt.Sprintf("mongodb://%s:%s", cfg.Host, cfg.Port)).
+		ApplyURI(fmt.Sprintf("mongodb://%s:%s/", cfg.Host, cfg.Port)).
 		SetAuth(credentials)
 	client, err := mongo.Connect(ctx, clientOpts)
 	if err != nil {
 		return nil, err
 	}
-
 	mongoClient = MongoClient{Client: client, DbName: cfg.DbName}
-	log.Printf("connection: %s %s %s %s %s", cfg.Host, cfg.Port, cfg.DbUser, cfg.DbPassword, cfg.DbName)
 	return &mongoClient, nil
 }
 
@@ -54,7 +52,12 @@ func (c *MongoClient) GetProducts(filter repository.ProductFilter) ([]repository
 	coll := c.Client.Database(c.DbName).Collection("hardware")
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	cursor, err := coll.Aggregate(ctx, ConstructPipeline(filter))
+	pipeline := mongo.Pipeline{}
+	pipeline = WithSearch(pipeline, filter.Keyword)
+	pipeline = WithMatch(pipeline, "category", filter.Category)
+	pipeline = WithMatch(pipeline, "cost", bson.D{{"$gte", filter.FloorCost}})
+	pipeline = WithMatch(pipeline, "cost", bson.D{{"$lte", filter.CeilingCost}})
+	cursor, err := coll.Aggregate(ctx, pipeline)
 	if err != nil {
 		return nil, err
 	}
@@ -62,72 +65,54 @@ func (c *MongoClient) GetProducts(filter repository.ProductFilter) ([]repository
 	var products []repository.Product
 	err = cursor.All(ctx, &products)
 	if err != nil {
-		return nil, err
+
 	}
 	return products, nil
 }
 
-func (c *MongoClient) AddProductToCart(clientName string, clientPhone string, product repository.Product) ([]repository.Product, error) {
+func (c *MongoClient) AddProductToCart(clientName string, clientPhone string, product repository.Product) ([]repository.CartElement, error) {
 	coll := c.Client.Database(c.DbName).Collection("hardware")
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	session, err := c.Client.StartSession()
-	if err != nil {
-		return nil, err
-	}
-	defer session.EndSession(ctx)
-	transactionPipeline := mongo.Pipeline{}
-	transactionPipeline = WithMatch(WithMatch(transactionPipeline, "manufacturer", product.Id.Manufacturer), "name", product.Id.Name)
 
-	_, err = session.WithTransaction(ctx, func(ctx mongo.SessionContext) (interface{}, error) {
-		_, err := coll.UpdateOne(ctx, bson.D{}, bson.D{{
+	order := bson.D{
+		{"date", time.Now()},
+		{"status", "ORDERED"},
+		{"client", bson.D{{"name", clientName}, {"phone", clientPhone}}},
+	}
+	_, err := coll.UpdateOne(ctx, bson.D{{"name", product.Id.Name}}, bson.D{{
+		"$push", bson.D{{
+			"orders", order},
+		}},
+		{
 			"$inc", bson.D{{
 				"quantity", -1,
 			}},
 		}})
-
-		if err != nil {
-			return nil, err
-		}
-		order := bson.D{
-			{"date", time.Now().UTC().Format(time.RFC3339)},
-			{"status", "ORDERED"},
-			{"client", bson.D{{"name", clientName}, {"phone", clientPhone}}},
-		}
-		_, err = coll.UpdateOne(ctx, bson.D{}, bson.D{{
-			"$push", bson.D{{
-				"orders", order},
-			}},
-		})
-		return nil, err
-
-	})
-
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("error on update cart query: %s", err)
 	}
-	err = session.CommitTransaction(ctx)
-	if err != nil {
-		return nil, err
-	}
-	log.Println("transaction completed")
 	pipeline := mongo.Pipeline{}
 	pipeline = WithMatch(WithMatch(WithUnwind(pipeline, "$orders"), "orders.status", "ORDERED"), "orders.client.name", clientName)
+
 	pipeline = append(pipeline, bson.D{{
 		"$group", bson.D{
-			{"_id", "_$id"},
+			{"_id", "$_id"},
+			{"category", bson.D{{"$first", "$category"}}},
+			{"cost", bson.D{{"$first", "$cost"}}},
 		},
 	}})
-	cursor, err := coll.Find(ctx, pipeline)
-	if err != nil {
-		return nil, err
-	}
-	log.Println("client cart fetch completed")
 
-	var products []repository.Product
+	cursor, err := coll.Aggregate(ctx, pipeline)
+	if err != nil {
+		return nil, fmt.Errorf("error on find client cart query: %s", err)
+	}
+
+	var products []repository.CartElement
 	err = cursor.All(ctx, &products)
 	if err != nil {
 		return nil, err
 	}
+	log.Println("client cart fetch completed")
 	return products, nil
 }
